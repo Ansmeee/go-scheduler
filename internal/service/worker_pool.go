@@ -2,42 +2,34 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"go-scheduler/internal/client"
 	"go-scheduler/internal/dao"
-	"go-scheduler/internal/logger"
-	"math"
+	"go-scheduler/internal/service/queue"
 	"sync"
-	"sync/atomic"
-	"time"
-
-	"go.uber.org/zap"
 )
 
-const workerNum = 8
-const taskNum = workerNum * workerNum
-
-var workerPool *WorkerPool
+const workerNum = 32
 
 type WorkerPool struct {
-	mu         sync.RWMutex
-	ctx        context.Context
-	cancel     context.CancelFunc
-	workers    map[string]*Worker
-	tasksQueue chan *dao.SchedulerTask
-	tasks      map[uint64]*dao.SchedulerTask
-	stopOnce   sync.Once
+	mu        sync.RWMutex
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	workers   map[string]*Worker
+	taskQueue TaskQueue
+	taskChan  chan uint64
+	stopOnce  sync.Once
 }
 
 func NewWorkerPool(ctx context.Context) *WorkerPool {
 	ctx, cancel := context.WithCancel(ctx)
-	workerPool = &WorkerPool{
-		ctx:        ctx,
-		cancel:     cancel,
-		workers:    make(map[string]*Worker),
-		tasks:      make(map[uint64]*dao.SchedulerTask),
-		tasksQueue: make(chan *dao.SchedulerTask, taskNum),
+	workerPool := &WorkerPool{
+		ctx:       ctx,
+		cancel:    cancel,
+		wg:        sync.WaitGroup{},
+		workers:   make(map[string]*Worker),
+		taskChan:  make(chan uint64, workerNum),
+		taskQueue: &queue.RedisQueue{},
 	}
 
 	for i := 0; i < workerNum; i++ {
@@ -48,33 +40,19 @@ func NewWorkerPool(ctx context.Context) *WorkerPool {
 }
 
 func (wp *WorkerPool) Start() {
-	go wp.dispatchLoop()
+	wp.wg.Add(1)
+	go func() {
+		defer wp.wg.Done()
+		wp.dispatchLoop()
+	}()
 }
 
 func (wp *WorkerPool) Stop() {
 	wp.stopOnce.Do(func() {
 		wp.cancel()
-		close(wp.tasksQueue)
-
-		wp.mu.Lock()
-		defer wp.mu.Unlock()
-
-		for _, w := range wp.workers {
-			close(w.TaskChan)
-		}
+		wp.wg.Wait()
+		close(wp.taskChan)
 	})
-}
-
-func (wp *WorkerPool) AddTask(task *dao.SchedulerTask) {
-	wp.mu.Lock()
-	wp.tasks[task.ID] = task
-	wp.mu.Unlock()
-
-	select {
-	case wp.tasksQueue <- task:
-	default:
-		logger.Error(wp.ctx, "ask queue is full, task is dropped:", zap.Uint64("id", task.ID))
-	}
 }
 
 func (wp *WorkerPool) registerWorker(id string) {
@@ -82,71 +60,22 @@ func (wp *WorkerPool) registerWorker(id string) {
 	defer wp.mu.Unlock()
 
 	if _, ok := wp.workers[id]; !ok {
-		wp.workers[id] = &Worker{
-			ID:       id,
-			Status:   WorkerStatusActive,
-			TaskChan: make(chan *dao.SchedulerTask, 50),
-		}
-
-		go wp.workers[id].Run(wp.ctx)
+		wp.workers[id] = &Worker{id: id, pool: wp}
+		go wp.workers[id].Run(wp.ctx, wp.taskChan)
 	}
-}
-
-func (wp *WorkerPool) selectWorker() *Worker {
-	wp.mu.RLock()
-	defer wp.mu.RUnlock()
-
-	var bestWorker *Worker
-	var minLoad int64 = math.MaxInt64
-
-	for _, worker := range wp.workers {
-		if worker.Status != WorkerStatusActive {
-			continue
-		}
-
-		load := atomic.LoadInt64(&worker.Load)
-		if load < minLoad {
-			bestWorker = worker
-			minLoad = load
-		}
-	}
-
-	return bestWorker
 }
 
 func (wp *WorkerPool) dispatchLoop() {
 	for {
-		select {
-		case <-wp.ctx.Done():
+		if wp.ctx.Err() != nil {
 			return
-		default:
-			res, err := client.RedisSlaver.LPop(wp.ctx, dao.TaskScheduleQueue).Result()
-			if err != nil {
-				logger.Error(wp.ctx, "task queue is not available", zap.Error(err))
-				time.Sleep(time.Millisecond * 100)
-				continue
-			}
-
-			task := &dao.SchedulerTask{}
-			if err = json.Unmarshal([]byte(res), task); err != nil {
-				logger.Error(wp.ctx, "task is invalid", zap.Error(err))
-				continue
-			}
-
-			worker := wp.selectWorker()
-			if worker == nil {
-				time.Sleep(5 * time.Millisecond)
-				logger.Error(wp.ctx, "no available worker, retried:", zap.Uint64("id", task.ID))
-				wp.AddTask(task)
-				continue
-			}
-
-			select {
-			case worker.TaskChan <- task:
-			default:
-				time.Sleep(5 * time.Millisecond)
-				logger.Error(wp.ctx, "task queue is full, retried", zap.Uint64("id", task.ID))
-			}
 		}
+
+		task, err := wp.taskQueue.BlockDequeue(wp.ctx)
+		if err != nil || task == nil {
+			continue
+		}
+
+		wp.taskChan <- task
 	}
 }

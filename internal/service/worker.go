@@ -11,36 +11,33 @@ import (
 )
 
 type Worker struct {
-	ID       string
-	Status   WorkerStatus
-	TaskChan chan *dao.SchedulerTask
-	Load     int64
+	id   string
+	pool *WorkerPool
 }
 
-func (w *Worker) Run(ctx context.Context) {
+func (w *Worker) Run(ctx context.Context, taskChan chan uint64) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case task, ok := <-w.TaskChan:
-			if !ok {
-				return
-			}
-
-			w.execute(ctx, task)
+		case taskId := <-taskChan:
+			w.execute(ctx, taskId)
 		}
 	}
 }
 
-func (w *Worker) execute(ctx context.Context, task *dao.SchedulerTask) {
+func (w *Worker) execute(ctx context.Context, taskId uint64) {
 	defer func() {
 		if err := recover(); err != nil {
-			logger.Error(ctx, "worker execute panic:", zap.Any("err", err))
+			logger.Error(ctx, "worker execute task panic:", zap.Any("err", err))
 		}
 	}()
 
-	atomic.AddInt64(&w.Load, 1)
-	defer atomic.AddInt64(&w.Load, -1)
+	task := &dao.SchedulerTask{ID: taskId}
+	if err := task.GetCacheData(ctx); err != nil {
+		logger.Error(ctx, "worker execute task failed", zap.Error(err), zap.Uint64("task_id", taskId))
+		return
+	}
 
 	if err := task.Running(ctx, nil); err != nil {
 		logger.Error(ctx, "worker execute task failed", zap.Error(err), zap.Uint64("task_id", task.ID))
@@ -52,13 +49,17 @@ func (w *Worker) execute(ctx context.Context, task *dao.SchedulerTask) {
 
 	if err := task.Execute(taskCtx); err != nil {
 		w.onExecuteFail(ctx, task)
+		w.pool.taskQueue.Nack(ctx, task.ID)
 		return
 	}
 
 	if err := task.Success(ctx, nil); err != nil {
 		logger.Error(ctx, "worker execute task failed", zap.Error(err), zap.Uint64("task_id", task.ID))
+		w.pool.taskQueue.Nack(ctx, task.ID)
 		return
 	}
+
+	w.pool.taskQueue.Ack(ctx, task.ID)
 }
 
 func (w *Worker) onExecuteFail(ctx context.Context, task *dao.SchedulerTask) {
@@ -82,7 +83,9 @@ func (w *Worker) onExecuteFail(ctx context.Context, task *dao.SchedulerTask) {
 		case <-ctx.Done():
 			return
 		case <-time.After(delay):
-			workerPool.AddTask(task)
+			if err := w.pool.taskQueue.Enqueue(ctx, task); err != nil {
+				logger.Error(ctx, "worker execute task failed", zap.Error(err), zap.Uint64("task_id", task.ID))
+			}
 		}
 	}()
 }

@@ -2,14 +2,18 @@ package dao
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"go-scheduler/internal/client"
+	"go-scheduler/internal/logger"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-const TaskScheduleQueue = "go:scheduler:task:schedule:queue"
+const SchedulerTaskCacheTTL = time.Hour
+const SchedulerTaskInfo = "go:scheduler:task:info"
 
 const (
 	SchedulerTaskStatusStopped = iota
@@ -51,6 +55,57 @@ type SchedulerTaskListParams struct {
 
 func (s *SchedulerTask) Execute(ctx context.Context) error {
 	return nil
+}
+
+func (s *SchedulerTask) GetCacheData(ctx context.Context) error {
+	if s.ID == 0 {
+		return fmt.Errorf("scheduler task not exist")
+	}
+
+	taskData, err := client.RedisSlaver.Get(ctx, fmt.Sprintf("%s:%d", SchedulerTaskInfo, s.ID)).Result()
+	if err == nil && taskData != "" {
+		if err = json.Unmarshal([]byte(taskData), &s); err == nil {
+			return nil
+		}
+
+		client.RedisSlaver.Del(ctx, fmt.Sprintf("%s:%d", SchedulerTaskInfo, s.ID))
+	}
+
+	if err = client.MySQLSlaver.Model(&SchedulerTask{}).Where("id = ?", s.ID).Find(s).Error; err != nil {
+		return err
+	}
+	
+	return nil
+}
+
+func (s *SchedulerTask) SetCacheData(ctx context.Context) error {
+	taskJson, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+
+	return client.RedisSlaver.Set(ctx, fmt.Sprintf("%s:%d", SchedulerTaskInfo, s.ID), string(taskJson), SchedulerTaskCacheTTL).Err()
+}
+
+func (s *SchedulerTask) BatchSetCacheData(ctx context.Context, tasks []*SchedulerTask) ([]uint64, error) {
+	taskIds := make([]uint64, 0, len(tasks))
+	pipe := client.RedisMaster.Pipeline()
+	for _, task := range tasks {
+		taskJson, err := json.Marshal(task)
+		if err != nil {
+			return nil, err
+		}
+
+		taskIds = append(taskIds, task.ID)
+		pipe.Set(ctx, fmt.Sprintf("%s:%d", SchedulerTaskInfo, task.ID), string(taskJson), SchedulerTaskCacheTTL)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		logger.Error(ctx, "scheduler claim task error", zap.Error(err))
+		return nil, err
+	}
+
+	return taskIds, nil
 }
 
 func (s *SchedulerTask) List(ctx context.Context, params SchedulerTaskListParams) ([]*SchedulerTask, error) {
@@ -112,7 +167,7 @@ func (s *SchedulerTask) ClaimTasks(ctx context.Context) ([]*SchedulerTask, error
 	return tasks, nil
 }
 
-func (s *SchedulerTask) UpdateTaskStatus(ctx context.Context, updateData map[string]interface{}, wheres map[string]interface{}, db *gorm.DB) (int64, error) {
+func (s *SchedulerTask) Update(ctx context.Context, updateData map[string]interface{}, wheres map[string]interface{}, db *gorm.DB) (int64, error) {
 	if len(updateData) == 0 || len(wheres) == 0 {
 		return 0, nil
 	}
@@ -153,7 +208,7 @@ func (s *SchedulerTask) Fallback(ctx context.Context, ids []uint64, db *gorm.DB)
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusPending,
 	}
-	return s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	return s.Update(ctx, updateData, wheres, db)
 }
 
 func (s *SchedulerTask) Scheduling(ctx context.Context, ids []uint64, db *gorm.DB) error {
@@ -166,7 +221,7 @@ func (s *SchedulerTask) Scheduling(ctx context.Context, ids []uint64, db *gorm.D
 		"status": SchedulerTaskStatusScheduling,
 	}
 
-	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	rows, err := s.Update(ctx, updateData, wheres, db)
 	if err != nil {
 		return err
 	}
@@ -188,7 +243,7 @@ func (s *SchedulerTask) Running(ctx context.Context, db *gorm.DB) error {
 		"status": SchedulerTaskStatusRunning,
 	}
 
-	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	rows, err := s.Update(ctx, updateData, wheres, db)
 	if err != nil {
 		return err
 	}
@@ -210,7 +265,7 @@ func (s *SchedulerTask) Success(ctx context.Context, db *gorm.DB) error {
 		"status": SchedulerTaskStatusSuccess,
 	}
 
-	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	rows, err := s.Update(ctx, updateData, wheres, db)
 	if err != nil {
 		return err
 	}
@@ -229,10 +284,11 @@ func (s *SchedulerTask) Failed(ctx context.Context, db *gorm.DB) error {
 	}
 
 	updateData := map[string]interface{}{
-		"status": SchedulerTaskStatusFailed,
+		"status":      SchedulerTaskStatusFailed,
+		"retry_count": "retry_count + 1",
 	}
 
-	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	rows, err := s.Update(ctx, updateData, wheres, db)
 	if err != nil {
 		return err
 	}
@@ -253,7 +309,7 @@ func (s *SchedulerTask) Retrying(ctx context.Context, db *gorm.DB) error {
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusRetrying,
 	}
-	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	rows, err := s.Update(ctx, updateData, wheres, db)
 	if err != nil {
 		return err
 	}
@@ -274,8 +330,8 @@ func (s *SchedulerTask) Dead(ctx context.Context, db *gorm.DB) error {
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusDead,
 	}
-	
-	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+
+	rows, err := s.Update(ctx, updateData, wheres, db)
 	if err != nil {
 		return err
 	}
