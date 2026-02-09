@@ -2,6 +2,7 @@ package dao
 
 import (
 	"context"
+	"fmt"
 	"go-scheduler/internal/client"
 	"time"
 
@@ -155,7 +156,7 @@ func (s *SchedulerTask) Fallback(ctx context.Context, ids []uint64, db *gorm.DB)
 	return s.UpdateTaskStatus(ctx, updateData, wheres, db)
 }
 
-func (s *SchedulerTask) Scheduling(ctx context.Context, ids []uint64, db *gorm.DB) (int64, error) {
+func (s *SchedulerTask) Scheduling(ctx context.Context, ids []uint64, db *gorm.DB) error {
 	wheres := map[string]interface{}{
 		"status": SchedulerTaskStatusPending,
 		"id":     ids,
@@ -164,10 +165,20 @@ func (s *SchedulerTask) Scheduling(ctx context.Context, ids []uint64, db *gorm.D
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusScheduling,
 	}
-	return s.UpdateTaskStatus(ctx, updateData, wheres, db)
+
+	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no task updated")
+	}
+
+	return nil
 }
 
-func (s *SchedulerTask) Running(ctx context.Context, db *gorm.DB) (int64, error) {
+func (s *SchedulerTask) Running(ctx context.Context, db *gorm.DB) error {
 	wheres := map[string]interface{}{
 		"status": SchedulerTaskStatusScheduling,
 		"id":     s.ID,
@@ -176,10 +187,20 @@ func (s *SchedulerTask) Running(ctx context.Context, db *gorm.DB) (int64, error)
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusRunning,
 	}
-	return s.UpdateTaskStatus(ctx, updateData, wheres, db)
+
+	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no task updated")
+	}
+
+	return nil
 }
 
-func (s *SchedulerTask) Success(ctx context.Context, db *gorm.DB) (int64, error) {
+func (s *SchedulerTask) Success(ctx context.Context, db *gorm.DB) error {
 	wheres := map[string]interface{}{
 		"status": SchedulerTaskStatusRunning,
 		"id":     s.ID,
@@ -188,10 +209,20 @@ func (s *SchedulerTask) Success(ctx context.Context, db *gorm.DB) (int64, error)
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusSuccess,
 	}
-	return s.UpdateTaskStatus(ctx, updateData, wheres, db)
+
+	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no task updated")
+	}
+
+	return nil
 }
 
-func (s *SchedulerTask) Failed(ctx context.Context, db *gorm.DB) (int64, error) {
+func (s *SchedulerTask) Failed(ctx context.Context, db *gorm.DB) error {
 	wheres := map[string]interface{}{
 		"status": SchedulerTaskStatusRunning,
 		"id":     s.ID,
@@ -200,10 +231,20 @@ func (s *SchedulerTask) Failed(ctx context.Context, db *gorm.DB) (int64, error) 
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusFailed,
 	}
-	return s.UpdateTaskStatus(ctx, updateData, wheres, db)
+
+	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no task updated")
+	}
+
+	return nil
 }
 
-func (s *SchedulerTask) Retrying(ctx context.Context, db *gorm.DB) (int64, error) {
+func (s *SchedulerTask) Retrying(ctx context.Context, db *gorm.DB) error {
 	wheres := map[string]interface{}{
 		"status": SchedulerTaskStatusFailed,
 		"id":     s.ID,
@@ -212,10 +253,19 @@ func (s *SchedulerTask) Retrying(ctx context.Context, db *gorm.DB) (int64, error
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusRetrying,
 	}
-	return s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no task updated")
+	}
+
+	return nil
 }
 
-func (s *SchedulerTask) Dead(ctx context.Context, db *gorm.DB) (int64, error) {
+func (s *SchedulerTask) Dead(ctx context.Context, db *gorm.DB) error {
 	wheres := map[string]interface{}{
 		"status": SchedulerTaskStatusFailed,
 		"id":     s.ID,
@@ -224,5 +274,15 @@ func (s *SchedulerTask) Dead(ctx context.Context, db *gorm.DB) (int64, error) {
 	updateData := map[string]interface{}{
 		"status": SchedulerTaskStatusDead,
 	}
-	return s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	
+	rows, err := s.UpdateTaskStatus(ctx, updateData, wheres, db)
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no task updated")
+	}
+
+	return nil
 }

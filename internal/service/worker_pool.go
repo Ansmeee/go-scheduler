@@ -73,7 +73,7 @@ func (wp *WorkerPool) AddTask(task *dao.SchedulerTask) {
 	select {
 	case wp.tasksQueue <- task:
 	default:
-		fmt.Println("task queue is full, task is dropped:", task.ID)
+		logger.Error(wp.ctx, "ask queue is full, task is dropped:", zap.Uint64("id", task.ID))
 	}
 }
 
@@ -136,7 +136,7 @@ func (wp *WorkerPool) dispatchLoop() {
 			worker := wp.selectWorker()
 			if worker == nil {
 				time.Sleep(5 * time.Millisecond)
-				fmt.Println("no available worker, retried:", task.ID)
+				logger.Error(wp.ctx, "no available worker, retried:", zap.Uint64("id", task.ID))
 				wp.AddTask(task)
 				continue
 			}
@@ -145,7 +145,7 @@ func (wp *WorkerPool) dispatchLoop() {
 			case worker.TaskChan <- task:
 			default:
 				time.Sleep(5 * time.Millisecond)
-				fmt.Println("task queue is full, retried:", task.ID)
+				logger.Error(wp.ctx, "task queue is full, retried", zap.Uint64("id", task.ID))
 			}
 		}
 	}
