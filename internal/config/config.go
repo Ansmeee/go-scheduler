@@ -1,9 +1,6 @@
 package config
 
 import (
-	"fmt"
-	"os"
-	"regexp"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -53,31 +50,9 @@ func Load() error {
 		return err
 	}
 
-	configFileContent, err := os.ReadFile(viper.ConfigFileUsed())
-	if err != nil {
+	if err := viper.Unmarshal(&AppCfg); err != nil {
 		return err
 	}
 
-	re := regexp.MustCompile(`\${([^}]+)}`)
-	result := re.ReplaceAllStringFunc(string(configFileContent), func(match string) string {
-		// 提取环境变量名称（去掉${}部分）
-		envVar := match[2 : len(match)-1]
-		// 获取环境变量值，如果不存在则保持原样
-		if value := os.Getenv(envVar); value != "" {
-			return value
-		}
-		return match
-	})
-
-	// 使用处理后的配置内容
-	if err = viper.ReadConfig(strings.NewReader(result)); err != nil {
-		return err
-	}
-
-	if err = viper.Unmarshal(&AppCfg); err != nil {
-		return err
-	}
-
-	fmt.Println(AppCfg.MySQLMaster)
 	return nil
 }
