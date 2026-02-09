@@ -1,6 +1,12 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+
+	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
 
@@ -31,18 +37,47 @@ type DBConfig struct {
 }
 
 func Load() error {
+	if err := godotenv.Load(); err != nil {
+		return err
+	}
+
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./configs")
 
+	viper.AutomaticEnv()
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
 	if err := viper.ReadInConfig(); err != nil {
 		return err
 	}
 
-	if err := viper.Unmarshal(&AppCfg); err != nil {
+	configFileContent, err := os.ReadFile(viper.ConfigFileUsed())
+	if err != nil {
 		return err
 	}
 
+	re := regexp.MustCompile(`\${([^}]+)}`)
+	result := re.ReplaceAllStringFunc(string(configFileContent), func(match string) string {
+		// 提取环境变量名称（去掉${}部分）
+		envVar := match[2 : len(match)-1]
+		// 获取环境变量值，如果不存在则保持原样
+		if value := os.Getenv(envVar); value != "" {
+			return value
+		}
+		return match
+	})
+
+	// 使用处理后的配置内容
+	if err = viper.ReadConfig(strings.NewReader(result)); err != nil {
+		return err
+	}
+
+	if err = viper.Unmarshal(&AppCfg); err != nil {
+		return err
+	}
+
+	fmt.Println(AppCfg.MySQLMaster)
 	return nil
 }
